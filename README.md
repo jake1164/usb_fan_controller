@@ -4,7 +4,7 @@ This is a placeholder for more information about the fan controller.. See todo l
 
 ## Parts List
 * NodeMCU ESP12E Devkit v2 
-* [https://learn.adafruit.com/dht DHT22]
+* DHT22
 * I2C 0.91 Inch OLED Display Module
 * Relay
 * 2 x button
