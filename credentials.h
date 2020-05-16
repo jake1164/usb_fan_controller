@@ -10,11 +10,12 @@
 #ifndef __CREDENTIALS_H__
 #define __CREDENTIALS_H__
 
-#define WIFI_SSID "Your SSID here"
-#define WIFI_PASSWD "Your WiFi Password Here"
+#define PORTAL_SSID "PortalAP"
+#define PORTAL_PASSWD "Portal Password"
 
-#define MQTT_ADDRESS "IP or Hostname goes here"
-#define MQTT_USERNAME "MQTT username goes here"
-#define MQTT_PASSWD "MQTT Password goes here"
+#define MQTT_ADDRESS "IP or Hostname"
+#define MQTT_PORT "1883"
+#define MQTT_USERNAME "MQTT USERNAME"
+#define MQTT_PASSWD "MQTT PASSWORD"
 
 #endif
