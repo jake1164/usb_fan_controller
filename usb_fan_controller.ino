@@ -15,11 +15,13 @@
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
+#include <PubSubClient.h>
 
 #include "credentials.h"
 
 using namespace ace_button;
 
+//#define RESET_SPIFFS // uncomment to format and reset the storage and settings.
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 32 // OLED display height, in pixels
 
@@ -57,6 +59,10 @@ uint16_t getPersistantTemperature();
 void setPersistantTemperature(uint16_t temp);
 void readJsonConfig();
 void saveJsonConfig();
+void saveConfigCallback();
+void configModeCallback(WiFiManager *wifiManager);
+void setupWifi(boolean button_press);
+void mqtt_connect();
 
 #define SETUP_DELAY 3000 // How long to press the button to enter setup mode.
 #define SETUP_TIME 10000 // How long to stay in setup mode.
@@ -71,22 +77,33 @@ char mqtt_port[6] = MQTT_PORT;
 char mqtt_username[60] = MQTT_USERNAME;
 char mqtt_passwd[60] = MQTT_PASSWD;
 
-bool shouldSaveConfig = false;
+int publish = 100; // publish counter flag
 
-void saveConfigCallback() {
-  Serial.println("Time to save config");
-  shouldSaveConfig = true;
-}
+WiFiClient espClient; 
+PubSubClient client(espClient);
+
+bool shouldSaveConfig = false;
 
 void setup() {
   Serial.begin(9600);
 
-  // FORMAT ME  
-  //SPIFFS.begin();
-  //SPIFFS.format();
+#ifdef RESET_SPIFFS
+  SPIFFS.begin();
+  SPIFFS.format();
+#endif
+
+  // Display is required for setupWifi
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) // Address 0x3C for 128x32
+  {
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;); // Don't proceed, loop forever
+  }
+
+  readJsonConfig();
+  
+  setupWifi(false);
 
   // Reading fs config
-  Serial.println("Getting Persistant Temperature (maybe?)");
   setpoint = getPersistantTemperature();
 
   if (setpoint > MAX_TEMPERATURE || setpoint < MIN_TEMPERATURE) {
@@ -94,77 +111,28 @@ void setup() {
     setpoint = getPersistantTemperature();
   }
 
-  Serial.print("Persistant Temperature: ");
-  Serial.println(setpoint);
-
-  Serial.print("mqtt_port setting before: ");
-  Serial.print(mqtt_port);
-  readJsonConfig();
-
-  Serial.print(" After: ");
-  Serial.println(mqtt_port);
-  
-  WiFiManagerParameter custom_mqtt_address("addres", "mqtt address", mqtt_address, 40);
-  WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 6);
-  WiFiManagerParameter custom_mqtt_username("username", "mqtt username", mqtt_username, 60);
-  WiFiManagerParameter custom_mqtt_passwd("passwd", "mqtt passwd", mqtt_passwd, 60);
-
-  WiFiManager wifiManager;
-
-  wifiManager.setSaveConfigCallback(saveConfigCallback);
-  wifiManager.addParameter(&custom_mqtt_address);
-  wifiManager.addParameter(&custom_mqtt_port);
-  wifiManager.addParameter(&custom_mqtt_username);
-  wifiManager.addParameter(&custom_mqtt_passwd);
-
-  // reset settings - for testing
-  //wifiManager.resetSettings();
-
-  wifiManager.setMinimumSignalQuality();
-
-  // Create the portal using the stored credentials.
-  if (!wifiManager.autoConnect(PORTAL_SSID, PORTAL_PASSWD)) {
-    Serial.println("failed to connect and hit timeout");
-    delay(3000);
-    ESP.reset();
-    delay(5000);
-  }
-
-  Serial.println("Connected to wifi.");
-  strcpy(mqtt_address, custom_mqtt_address.getValue());
-  strcpy(mqtt_port, custom_mqtt_port.getValue());
-  strcpy(mqtt_username, custom_mqtt_username.getValue());
-  strcpy(mqtt_passwd, custom_mqtt_passwd.getValue());
-
-  if (shouldSaveConfig) {
-    Serial.println("Saving config");
-    saveJsonConfig();
-  }
-
   pinMode(DOWN_PIN, INPUT_PULLUP); // INPUT OR INPUT_PULLUP or INPUT_PULLDOWN
   pinMode(UP_PIN, INPUT_PULLUP);
 
   downConfig.setEventHandler(handleDownEvent);
-  //downConfig.setFeature(ButtonConfig::kFeatureClick);
   downConfig.setFeature(ButtonConfig::kFeatureLongPress);
   downConfig.setLongPressDelay(SETUP_DELAY);
 
   upButton.setEventHandler(handleUpEvent);
-  //ubc->setFeature(ButtonConfig::kFeatureClick);
+  upConfig.setFeature(ButtonConfig::kFeatureLongPress);
+  upConfig.setLongPressDelay(SETUP_DELAY);
 
   downButton.init(DOWN_PIN);
   upButton.init(UP_PIN);
 
-  Serial.println(F("DHT22 test!"));
-
   dht.begin();
 
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) // Address 0x3C for 128x32
-  {
-    Serial.println(F("SSD1306 allocation failed"));
-    for (;;); // Don't proceed, loop forever
-  }
+  client.setServer(mqtt_address, atoi(mqtt_port));  
 
+  // TODO: this needs to be non-blocking
+  Serial.print("MQTT Client connected: ");
+  mqtt_connect();
+  
   display.display();
   display.clearDisplay();
   display.setFont(&FreeSans9pt7b);
@@ -176,6 +144,60 @@ void setup() {
   Serial.println("Setup Complete");
 
   delay(1500);
+}
+
+void setupWifi(boolean button_press) {
+
+  WiFiManagerParameter custom_mqtt_address("address", "mqtt address", mqtt_address, 40);
+  WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 6);
+  WiFiManagerParameter custom_mqtt_username("username", "mqtt username", mqtt_username, 60);
+  WiFiManagerParameter custom_mqtt_passwd("passwd", "mqtt passwd", mqtt_passwd, 60);
+
+  WiFiManager wifiManager;
+
+  wifiManager.setAPCallback(configModeCallback);
+  
+  if (button_press) {
+    // Actions to perform only if the setup was launched from a button press 
+    // resetSettings is a workaround until https://github.com/tzapu/WiFiManager/issues/1019 is finished
+    Serial.println("MANUAL LAUNCH... RESETING WIFI SETTINGS");
+    wifiManager.resetSettings(); 
+    // Timeout wont work as resetSettings will wipe out the configured WIFI settings.
+    //wifiManager.setTimeout(180);
+  }
+
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  wifiManager.addParameter(&custom_mqtt_address);
+  wifiManager.addParameter(&custom_mqtt_port);
+  wifiManager.addParameter(&custom_mqtt_username);
+  wifiManager.addParameter(&custom_mqtt_passwd);
+
+
+  wifiManager.setMinimumSignalQuality();
+
+  // TODO: This might need to be reconsidered as wifi should be non-blocking so the fan always works even when wifi is not.
+
+  // Create the portal using the stored credentials.
+  if (!wifiManager.autoConnect(PORTAL_SSID, PORTAL_PASSWD)) {
+    Serial.println("failed to connect and hit timeout");
+    delay(3000);
+    ESP.reset();
+    delay(5000);
+  }
+
+  Serial.println("Connected to wifi.");
+
+  strcpy(mqtt_address, custom_mqtt_address.getValue());
+  strcpy(mqtt_port, custom_mqtt_port.getValue());
+  strcpy(mqtt_username, custom_mqtt_username.getValue());
+  strcpy(mqtt_passwd, custom_mqtt_passwd.getValue());
+
+
+  if (shouldSaveConfig) {
+    Serial.println("Saving config");
+    saveJsonConfig();
+  }
 }
 
 void loop() {
@@ -232,13 +254,36 @@ void loop() {
       display.clearDisplay();
       display.setFont(&FreeSans9pt7b);
       display.setCursor(0, 16);
-      display.setTextSize(1); // Draw 3X-scale text
+      display.setTextSize(1);
       display.setTextColor(WHITE);
-      display.print("temp ");
+      display.print("Temp ");
       display.print(f);
-      display.print((char)247);
+      //display.print((char)247); // default fonts dont seem to support the degree symbol.. added to todo list.
       display.println("F");
       display.display();
+
+      // Print on second line the status of the fan?
+
+      // Publish to MQTT only every 30 seconds. 
+      if(publish < 15) {
+        publish++;
+      }
+      else {        
+        if(!client.connected()){
+          Serial.println("MQTT Client Not Connected");
+          mqtt_connect();
+        }
+        client.loop();
+        publish = 0;
+        Serial.println("Publishing to MQTT Server");
+        bool sent;
+        sent = client.publish("home/xbox/temperature", String(f, 1).c_str());
+        Serial.print("Temperature Sent :"); Serial.println(sent);
+        sent = client.publish("home/xbox/fan", "ON");
+        Serial.print("Fan Sent :"); Serial.println(sent);
+        sent = client.publish("home/xbox/humidity", String(h, 1).c_str());
+        Serial.print("humidity Sent :"); Serial.println(sent);
+      }       
     }
   }
   last = current;
@@ -258,15 +303,19 @@ void loop() {
 void handleUpEvent(AceButton* /*button*/, uint8_t eventType, uint8_t /*buttonState*/) {
   if (setupMode > 0 && eventType == AceButton::kEventPressed) {
     if (setpoint + 1 < MAX_TEMPERATURE)
-      setpoint++;// = setpoint + 1;
+      setpoint++;
     setupMode = SETUP_TIME;
+  } else if (eventType == AceButton::kEventLongPressed) {
+    Serial.println("Opening PORTAL");
+    setupWifi(true);
+    Serial.println("Connected to WiFi");
   }
 }
 
 void handleDownEvent(AceButton* /*button*/, uint8_t eventType, uint8_t /*buttonState*/) {
   if (setupMode > 0 && eventType == AceButton::kEventPressed) {
     if (setpoint - 1 > MIN_TEMPERATURE)
-      setpoint--;// = setpoint - 1;
+      setpoint--;
     setupMode = SETUP_TIME;
   } else if (eventType == AceButton::kEventLongPressed) {
     setupMode = SETUP_TIME;
@@ -297,7 +346,7 @@ void readJsonConfig() {
     if (SPIFFS.exists(JSON_SETTING_FILE)) {
       File configFile = SPIFFS.open(JSON_SETTING_FILE, "r");
       if (configFile) {
-        size_t size = configFile.size();        
+        size_t size = configFile.size();
         std::unique_ptr<char[]> buf(new char[size]);
         configFile.readBytes(buf.get(), size);
         DynamicJsonDocument doc(1024);
@@ -310,14 +359,12 @@ void readJsonConfig() {
         if (doc.containsKey("mqtt_address"))
           strcpy(mqtt_address, doc["mqtt_address"]);
 
-
-        if (doc.containsKey("mqtt_port")) {
+        if (doc.containsKey("mqtt_port"))
           strcpy(mqtt_port, doc["mqtt_port"]);
-          Serial.print("mqtt_port value being read: ");
-          Serial.println(mqtt_port);
-        }
+
         if (doc.containsKey("mqtt_username"))
           strcpy(mqtt_username, doc["mqtt_username"]);
+
         if (doc.containsKey("mqtt_passwd"))
           strcpy(mqtt_passwd, doc["mqtt_passwd"]);
 
@@ -334,12 +381,8 @@ void saveJsonConfig() {
 
   DynamicJsonDocument doc(1024);
   doc["mqtt_address"] = mqtt_address;
-  
-  Serial.print("mqtt_port value being saved: ");
-  Serial.println(mqtt_port);
   doc["mqtt_port"] = mqtt_port;
   doc["mqtt_username"] = mqtt_username;
-  
   doc["mqtt_passwd"] = mqtt_passwd;
 
   File configFile = SPIFFS.open(JSON_SETTING_FILE, "w");
@@ -348,4 +391,44 @@ void saveJsonConfig() {
   }
   serializeJson(doc, configFile);
   configFile.close();
+}
+
+void saveConfigCallback() {
+  Serial.println("Time to save config");
+  shouldSaveConfig = true;
+}
+
+void configModeCallback(WiFiManager *wifiManager) {
+  Serial.println("Entered Config Mode");
+  Serial.println(WiFi.softAPIP());
+  Serial.println(wifiManager->getConfigPortalSSID());
+  display.clearDisplay();
+  display.setFont(&FreeSans9pt7b);
+  display.setCursor(0, 16);
+  display.setTextSize(1); // Draw 3X-scale text
+  display.setTextColor(WHITE);
+  display.println(wifiManager->getConfigPortalSSID());
+  display.display();
+}
+
+void mqtt_connect() {
+  while(!client.connected()) {
+    Serial.print("Connecting to MQTT Server: ");    
+    if(client.connect("FanControllerClient", mqtt_username, mqtt_passwd)){
+      Serial.println("Connected to MQTT server.. Yay!");
+    } else {
+      Serial.print("MQTT client failed with state: ");
+      Serial.print(client.state());
+      display.display();
+      display.clearDisplay();
+      display.setFont(&FreeSans9pt7b);
+      display.setTextSize(1); // Draw 2X-scale text
+      display.setTextColor(WHITE);
+      display.setCursor(1, 0);
+      display.println("MQTT Error");
+      display.display();
+
+      delay(2000); // Prevent banging too hard.
+    }  
+  }
 }
