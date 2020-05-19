@@ -327,6 +327,17 @@ void handleDownEvent(AceButton* /*button*/, uint8_t eventType, uint8_t /*buttonS
     display.println("SETUP");
     display.display();
     delay(2000);
+  } else if (eventType == AceButton::kEventPressed) {
+    // Display the current setpoint temperature. 
+    display.clearDisplay();
+    display.setFont(&FreeSans9pt7b);
+    display.setCursor(0, 16);
+    display.setTextSize(1); // Draw 3X-scale text
+    display.setTextColor(WHITE);
+    display.print("set: ");
+    display.print(setpoint);
+    display.println(" F");
+    display.display();    
   }
 }
 
