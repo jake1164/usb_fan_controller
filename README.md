@@ -15,7 +15,7 @@ This is a placeholder for the schematic
 ## TODO
 - [ ] Fill out readme with useful information
 - [ ] Add Relay to turn power on and off
-- [ ] Single click down button to show temperature
+- [x] Single click down button to show temperature
 - [x] Display portal SSID when in portal mode
 - [x] Long press up button to re-launch portal
 - [x] Add MQTT support
